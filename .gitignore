@@ -1,0 +1,23 @@
+# 环境变量
+.env
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyo
+
+# MinerU / OpenDataLoader 临时输出
+output_mineru/
+output_opendataloader/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 评测临时文件
+chroma_bench_*/
+benchmark_chunk.py

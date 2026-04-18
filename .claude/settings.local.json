@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(E:/miniconda3/envs/teamflowai/python.exe -c ' *)"
+    ]
+  }
+}
