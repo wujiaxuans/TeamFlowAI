@@ -1,9 +1,8 @@
 """
 RAG 核心模块
-实现文档加载、向量化存储、检索问答的完整流程：
-  1. 从 docs/ 目录加载 .txt/.md 文档
-  2. 文本分割后通过智谱 Embedding 模型生成向量，存入 ChromaDB
-  3. 基于 RetrievalQA 链实现检索增强问答，返回答案及来源文档
+  1. 从 docs/ 加载 .txt/.md 文档（PDF 通过 MinerU 自动转换）
+  2. 文本分割 → 智谱 Embedding → ChromaDB 向量存储
+  3. 混合检索（向量 + BM25） + ConversationalRetrievalChain 多轮问答
 """
 
 import os
@@ -14,12 +13,17 @@ import subprocess
 import time
 import requests
 from langchain_core.embeddings import Embeddings
+from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import TextLoader
+from langchain_community.retrievers import BM25Retriever
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_classic.chains import ConversationalRetrievalChain
+from langchain_classic.retrievers import EnsembleRetriever
 from langchain_core.prompts import PromptTemplate
+
+from prompts import QA_PROMPT, CONDENSE_PROMPT
 
 # 智谱 GLM API 地址（OpenAI 兼容接口）
 ZHIPU_API_BASE = "https://open.bigmodel.cn/api/paas/v4"
@@ -29,24 +33,6 @@ CHROMA_PERSIST_DIR = "chroma_db"
 DOCS_DIR = "docs"
 # PDF 源文件目录
 PDF_DIR = os.path.join(DOCS_DIR, "pdf")
-
-# 问答提示词模板，{context} 为检索到的文档片段，{question} 为用户提问
-PROMPT_TEMPLATE = """请根据以下参考资料回答问题。如果资料中没有相关信息，请回答"根据现有文档无法回答该问题"。
-
-参考资料：
-{context}
-
-问题：{question}
-回答："""
-
-# 问题改写模板，将对话历史中的追问改写为独立问题再检索
-CONDENSAL_PROMPT = """根据以下对话历史和最新问题，将最新问题改写为一个独立、完整的问题。
-
-对话历史：
-{chat_history}
-
-最新问题：{question}
-独立问题："""
 
 
 class ZhipuEmbeddings(Embeddings):
@@ -112,11 +98,10 @@ def _get_doc_files() -> list[str]:
     if not os.path.exists(DOCS_DIR):
         return []
     files = []
-    for ext in ("txt", "md"):
-        for root, _, filenames in os.walk(DOCS_DIR):
-            for f in filenames:
-                if f.endswith(f".{ext}"):
-                    files.append(os.path.abspath(os.path.join(root, f)))
+    for root, _, filenames in os.walk(DOCS_DIR):
+        for f in filenames:
+            if f.endswith((".txt", ".md")):
+                files.append(os.path.abspath(os.path.join(root, f)))
     return files
 
 
@@ -150,15 +135,19 @@ def _split_docs(docs: list) -> list:
     return splitter.split_documents(docs)
 
 
-def build_vector_store(docs: list, embeddings: ZhipuEmbeddings) -> Chroma:
-    """将文档分割为小块，生成向量并存入 ChromaDB"""
-    chunks = _split_docs(docs)
-    # 为每个 chunk 添加 mtime 元数据，用于后续增量判断
+def _add_mtime(chunks: list) -> None:
+    """为 chunk 列表添加 mtime 元数据，用于增量判断"""
     for chunk in chunks:
         source = chunk.metadata.get("source", "")
         abs_source = os.path.abspath(source)
         if os.path.exists(abs_source):
             chunk.metadata["mtime"] = os.path.getmtime(abs_source)
+
+
+def build_vector_store(docs: list, embeddings: ZhipuEmbeddings) -> Chroma:
+    """将文档分割为小块，生成向量并存入 ChromaDB"""
+    chunks = _split_docs(docs)
+    _add_mtime(chunks)
     print(f"文档已分割为 {len(chunks)} 个片段")
 
     vectorstore = Chroma.from_documents(
@@ -296,11 +285,7 @@ def get_or_create_vectorstore(embeddings: ZhipuEmbeddings) -> Chroma | None:
 
     # 添加新/更新的文档
     chunks = _split_docs(new_docs)
-    # 为每个 chunk 添加 mtime 元数据，用于后续增量判断
-    for chunk in chunks:
-        source = chunk.metadata.get("source", "")
-        abs_source = os.path.abspath(source)
-        chunk.metadata["mtime"] = os.path.getmtime(abs_source)
+    _add_mtime(chunks)
 
     vectorstore.add_documents(chunks)
     print(f"已增量更新 {len(changed_files)} 个文档（{len(chunks)} 个片段）")
@@ -308,29 +293,52 @@ def get_or_create_vectorstore(embeddings: ZhipuEmbeddings) -> Chroma | None:
     return vectorstore
 
 
+def _chinese_tokenizer(text: str) -> list[str]:
+    """中文分词器，用于 BM25 关键词检索"""
+    import jieba
+    return [w for w in jieba.cut(text) if w.strip()]
+
+
+def _build_ensemble_retriever(vectorstore: Chroma) -> EnsembleRetriever:
+    """构建混合检索器：向量检索 + BM25 关键词检索，各 50% 权重"""
+    stored = vectorstore.get(include=["documents", "metadatas"])
+    docs = [
+        Document(page_content=text, metadata=meta or {})
+        for text, meta in zip(stored["documents"], stored["metadatas"])
+    ]
+    print(f"BM25 索引文档数: {len(docs)}")
+
+    bm25 = BM25Retriever.from_documents(docs, k=3, preprocess_func=_chinese_tokenizer)
+    vector = vectorstore.as_retriever(search_kwargs={"k": 3})
+
+    return EnsembleRetriever(retrievers=[vector, bm25], weights=[0.5, 0.5])
+
+
 def create_qa_chain(api_key: str) -> ConversationalRetrievalChain | None:
     """
     创建多轮对话 RAG 问答链
-    流程：结合对话历史改写问题 -> 向量检索 -> LLM 基于文档生成回答
+    流程：结合对话历史改写问题 -> 混合检索（向量+BM25） -> LLM 基于文档生成回答
     """
     embeddings = get_embeddings(api_key)
     vectorstore = get_or_create_vectorstore(embeddings)
     if vectorstore is None:
         return None
 
+    retriever = _build_ensemble_retriever(vectorstore)
+
     llm = get_llm(api_key)
     prompt = PromptTemplate(
-        template=PROMPT_TEMPLATE,
+        template=QA_PROMPT,
         input_variables=["context", "question"],
     )
     condense_prompt = PromptTemplate(
-        template=CONDENSAL_PROMPT,
+        template=CONDENSE_PROMPT,
         input_variables=["chat_history", "question"],
     )
 
     qa_chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
-        retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
+        retriever=retriever,
         return_source_documents=True,
         combine_docs_chain_kwargs={"prompt": prompt},
         condense_question_prompt=condense_prompt,

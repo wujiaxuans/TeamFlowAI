@@ -1,18 +1,18 @@
 """
 TeamFlowAI RAG 问答系统 - Streamlit Web 界面
-提供文件上传、交互式问答、来源引用展示功能。
+提供文件上传、交互式问答、来源引用展示、文档生成功能。
 """
 
 import os
 import streamlit as st
 from dotenv import load_dotenv
 from rag import create_qa_chain, ask, get_embeddings, get_or_create_vectorstore, PDF_DIR, DOCS_DIR
+from agent import create_content_agent, run_agent
 
 load_dotenv()
 
 # --- 页面配置 ---
-st.set_page_config(page_title="TeamFlowAI RAG", page_icon="📖", layout="wide")
-st.title("📖 TeamFlowAI RAG 问答系统")
+st.set_page_config(page_title="TeamFlowAI", page_icon="📖", layout="wide")
 
 
 # --- 初始化 session state ---
@@ -25,6 +25,10 @@ def init_state():
         st.session_state.chat_history = []
     if "vectorstore_ready" not in st.session_state:
         st.session_state.vectorstore_ready = False
+    if "content_agent" not in st.session_state:
+        st.session_state.content_agent = None
+    if "generated_doc" not in st.session_state:
+        st.session_state.generated_doc = ""
 
 
 init_state()
@@ -45,7 +49,7 @@ def load_qa_chain():
     """初始化或重建 QA 链"""
     api_key = _get_api_key()
     if not api_key:
-        st.error("未检测到 GLM_API_KEY，请在 .env 或 Streamlit Secrets 中配置")
+        st.error("未检测到 GLM_API_KEY")
         return False
     with st.spinner("正在加载知识库..."):
         chain = create_qa_chain(api_key)
@@ -57,8 +61,23 @@ def load_qa_chain():
     return False
 
 
+def load_content_agent():
+    """初始化文档生成 Agent"""
+    api_key = _get_api_key()
+    if not api_key:
+        st.error("未检测到 GLM_API_KEY")
+        return False
+    try:
+        with st.spinner("正在初始化 Agent..."):
+            st.session_state.content_agent = create_content_agent(api_key)
+        return True
+    except ValueError as e:
+        st.error(str(e))
+        return False
+
+
 def reload_vectorstore():
-    """增量更新向量库（处理新上传的文件）"""
+    """增量更新向量库"""
     api_key = _get_api_key()
     if not api_key:
         return
@@ -115,7 +134,7 @@ with st.sidebar:
     else:
         st.caption("暂无文档")
 
-    # 重新加载按钮
+    # 操作按钮
     if st.button("🗑️ 清空对话", use_container_width=True):
         st.session_state.messages = []
         st.session_state.chat_history = []
@@ -125,66 +144,116 @@ with st.sidebar:
         reload_vectorstore()
         st.rerun()
 
-    # 首次自动加载
     if not st.session_state.vectorstore_ready:
         if st.button("🚀 启动知识库", use_container_width=True, type="primary"):
             load_qa_chain()
 
 
-# --- 主区域：对话 ---
-# 渲染历史消息
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if msg["role"] == "assistant" and msg.get("sources"):
-            with st.expander("📎 查看引用来源"):
-                for src in msg["sources"]:
-                    st.markdown(f"**{src['file']}**")
-                    st.caption(src["content"][:300])
-                    st.divider()
+# --- 主区域：标签页 ---
+tab1, tab2 = st.tabs(["💬 RAG 问答", "📝 文档生成"])
 
-# 问答输入
-if prompt := st.chat_input("输入你的问题..."):
-    # 检查 QA 链是否就绪
-    if not st.session_state.qa_chain:
-        if not load_qa_chain():
-            st.stop()
+# ========== Tab 1: RAG 问答 ==========
+with tab1:
+    st.header("💬 RAG 问答")
 
-    # 显示用户消息
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    # 渲染历史消息
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg["role"] == "assistant" and msg.get("sources"):
+                with st.expander("📎 查看引用来源"):
+                    for src in msg["sources"]:
+                        st.markdown(f"**{src['file']}**")
+                        st.caption(src["content"][:300])
+                        st.divider()
 
-    # 调用 RAG 获取回答
-    with st.chat_message("assistant"):
-        with st.spinner("思考中..."):
-            result = ask(st.session_state.qa_chain, prompt, st.session_state.chat_history)
+    # 问答输入
+    if prompt := st.chat_input("输入你的问题..."):
+        if not st.session_state.qa_chain:
+            if not load_qa_chain():
+                st.stop()
 
-        st.markdown(result["answer"])
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-        # 整理来源（去重）
-        sources = []
-        seen = set()
-        for doc in result["sources"]:
-            file_name = os.path.basename(doc.metadata.get("source", "未知"))
-            content = doc.page_content
-            key = (file_name, content[:100])
-            if key not in seen:
-                seen.add(key)
-                sources.append({"file": file_name, "content": content})
+        with st.chat_message("assistant"):
+            with st.spinner("思考中..."):
+                result = ask(st.session_state.qa_chain, prompt, st.session_state.chat_history)
 
-        if sources:
-            with st.expander("📎 查看引用来源"):
-                for src in sources:
-                    st.markdown(f"**{src['file']}**")
-                    st.caption(src["content"][:300])
-                    st.divider()
+            st.markdown(result["answer"])
 
-    # 保存助手消息
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": result["answer"],
-        "sources": sources,
-    })
-    # 追加对话历史（用于 ConversationalRetrievalChain 问题改写）
-    st.session_state.chat_history.append((prompt, result["answer"]))
+            sources = []
+            seen = set()
+            for doc in result["sources"]:
+                file_name = os.path.basename(doc.metadata.get("source", "未知"))
+                content = doc.page_content
+                key = (file_name, content[:100])
+                if key not in seen:
+                    seen.add(key)
+                    sources.append({"file": file_name, "content": content})
+
+            if sources:
+                with st.expander("📎 查看引用来源"):
+                    for src in sources:
+                        st.markdown(f"**{src['file']}**")
+                        st.caption(src["content"][:300])
+                        st.divider()
+
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": result["answer"],
+            "sources": sources,
+        })
+        st.session_state.chat_history.append((prompt, result["answer"]))
+
+
+# ========== Tab 2: 文档生成 ==========
+with tab2:
+    st.header("📝 AI 文档生成")
+    st.caption("基于知识库自动生成 PRD、会议纪要、周报等结构化文档")
+
+    # 文档类型选择
+    doc_type = st.selectbox(
+        "文档类型",
+        options=["PRD", "会议纪要", "周报"],
+        index=0,
+    )
+
+    # 需求描述输入
+    requirement = st.text_area(
+        "需求描述",
+        placeholder="例如：帮我写一份关于 MCP 协议的 PRD",
+        height=100,
+    )
+
+    # 生成按钮
+    if st.button("🚀 生成文档", type="primary"):
+        if not requirement.strip():
+            st.warning("请输入需求描述")
+        else:
+            if not st.session_state.content_agent:
+                if not load_content_agent():
+                    st.stop()
+
+            full_input = f"帮我写一份{requirement.strip()}，文档类型是{doc_type}"
+
+            with st.spinner("Agent 正在生成文档..."):
+                output = run_agent(st.session_state.content_agent, full_input)
+
+            st.session_state.generated_doc = output
+
+    # 展示生成结果
+    if st.session_state.generated_doc:
+        st.divider()
+        st.subheader("📄 生成结果")
+
+        st.markdown(st.session_state.generated_doc)
+
+        # 下载按钮
+        st.download_button(
+            label="⬇️ 下载 Markdown",
+            data=st.session_state.generated_doc,
+            file_name=f"{doc_type}.md",
+            mime="text/markdown",
+        )

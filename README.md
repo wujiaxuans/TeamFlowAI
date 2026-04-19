@@ -1,18 +1,78 @@
-# TeamFlowAI RAG 问答系统
+# TeamFlowAI
 
-基于 LangChain + ChromaDB + 智谱 GLM API 的检索增强生成（RAG）问答系统，支持多轮对话和 PDF 文档自动解析。
+基于 LangChain + ChromaDB + 智谱 GLM 的 **RAG 知识库问答** 与 **AI 文档生成** 系统。
 
-## 功能
+---
 
-- 多轮对话 RAG 问答，自动将追问改写为独立问题再检索
-- 支持 .txt / .md / PDF 文档，PDF 自动通过 MinerU 转为 Markdown
+## 核心功能
+
+### 模块一：RAG 知识库问答
+
+- 多轮对话问答，自动将追问改写为独立问题再检索
+- 混合检索（向量 + BM25 关键词），各占 50% 权重
+- 支持 `.txt` / `.md` / PDF 文档，PDF 自动通过 MinerU 转 Markdown
 - 向量库增量更新，仅处理新增或修改的文档
 - Streamlit Web 界面：文件上传、对话式问答、引用来源展示
-- 命令行交互模式
 
-## 快速开始
+### 模块二：AI 文档生成 Agent
 
-### 1. 创建环境并安装依赖
+- ReAct 模式 Agent，自主调用 RAG 检索 + 模板填充
+- 支持生成 PRD、会议纪要、周报三种结构化文档
+- 自动搜索背景资料 → 填充模板 → 润色优化
+- 输出 Markdown 格式，可下载 `.md` 文件
+
+---
+
+## 技术栈
+
+| 模块 | 技术 |
+|------|------|
+| LLM | 智谱 GLM-4-flash（问答）+ GLM-4-flash（Agent） |
+| Embedding | 智谱 embedding-3 |
+| 向量库 | ChromaDB |
+| 检索 | EnsembleRetriever（向量 + BM25） |
+| 分词 | jieba（中文 BM25） |
+| Agent | LangChain ReAct + Tool Calling |
+| PDF 解析 | MinerU |
+| Web 界面 | Streamlit |
+
+---
+
+## 架构流程
+
+### RAG 问答流程
+
+```
+用户提问
+    ↓
+问题改写（结合对话历史生成独立问题）
+    ↓
+混合检索（向量检索 + BM25 关键词检索）
+    ↓
+LLM 基于检索结果生成回答
+    ↓
+返回答案 + 引用来源
+```
+
+### 文档生成 Agent 流程
+
+```
+用户输入需求描述
+    ↓
+Agent 决策 → 调用 rag_search 搜索背景资料
+    ↓
+Agent 决策 → 调用 generate_content 填充模板
+    ↓
+Agent 决策 → 调用 refine_content 润色优化
+    ↓
+输出结构化 Markdown 文档
+```
+
+---
+
+## 本地运行
+
+### 1. 创建环境
 
 ```bash
 conda create -n teamflowai python=3.12 -y
@@ -29,57 +89,57 @@ cp .env.example .env
 
 ### 3. 准备文档
 
-将 .txt / .md 文件放入 `docs/`，PDF 文件放入 `docs/pdf/`。
+将 `.txt` / `.md` 文件放入 `docs/`，PDF 文件放入 `docs/pdf/`。
 
-### 4. 启动
+### 4. 启动 Web 界面
 
-**Web 界面：**
 ```bash
 streamlit run web.py
 ```
 
-**命令行：**
+### 5. 命令行模式
+
 ```bash
+# RAG 问答
 python app.py
+
+# 文档生成 Agent
+python agent.py
 ```
+
+---
+
+## 在线 Demo
+
+🔗 [TeamFlowAI Streamlit Cloud](https://teamflowai-ijuhzrwdt6dbvyanqcuxpy.streamlit.app/)
+
+---
 
 ## 项目结构
 
 ```
-├── app.py              # 命令行交互入口
-├── web.py              # Streamlit Web 界面
-├── rag.py              # RAG 核心逻辑（文档加载、向量化、检索问答）
+├── web.py              # Streamlit Web 界面（双模块）
+├── app.py              # RAG 问答 CLI 入口
+├── agent.py            # 文档生成 Agent
+├── rag.py              # RAG 核心逻辑
+├── prompts.py          # 提示词与文档模板
 ├── requirements.txt    # 依赖
 ├── .env.example        # 环境变量示例
-├── docs/               # 文档目录（.txt / .md）
-│   └── pdf/            # PDF 源文件（自动转为 Markdown）
-└── chroma_db/          # ChromaDB 向量库（自动生成）
+├── docs/               # 文档目录
+│   └── pdf/            # PDF 源文件
+└── chroma_db/          # ChromaDB 向量库
 ```
 
-## 技术栈
+---
 
-- **LangChain** — 编排框架（ConversationalRetrievalChain）
-- **ChromaDB** — 向量数据库
-- **智谱 GLM** — Embedding (embedding-3) + LLM (glm-4-flash)
-- **MinerU** — PDF 转 Markdown
-- **Streamlit** — Web 界面
+## Chunk Size 评测
 
-## Chunk Size 评测结果
+使用 10 个测试问题对比三种 chunk_size 配置（overlap=20%）：
 
-使用 10 个测试问题，对比三种 chunk_size 配置（overlap 均为 20%）的 Top3 召回率：
+| chunk_size | Top3 召回率 |
+|------------|-------------|
+| 300 | 80% |
+| 500 | 80% |
+| 1000 | 80% |
 
-| # | 问题 | 预期文档 | cs=300 | cs=500 | cs=1000 |
-|---|------|----------|--------|--------|---------|
-| 1 | RAG的完整流程分哪几个步骤？ | RAG学习测试QA.md | ✓ | ✓ | ✓ |
-| 2 | RAG检索效果差可以从哪些方向优化？ | RAG学习测试QA.md | ✓ | ✓ | ✓ |
-| 3 | HyDE是什么，解决了什么问题？ | RAG学习测试QA.md | ✗ | ✗ | ✗ |
-| 4 | Function Calling和MCP协议有什么区别？ | Function Calling与MCP.md | ✓ | ✓ | ✓ |
-| 5 | MCP协议的核心设计思路是什么？ | Function Calling与MCP.md | ✓ | ✓ | ✓ |
-| 6 | Workflow和Agent的本质区别是什么？ | effective-agent-patterns.md | ✓ | ✓ | ✓ |
-| 7 | Orchestrator和Subagent分别是什么角色？ | effective-agent-patterns.md | ✗ | ✗ | ✗ |
-| 8 | 什么情况下应该用Workflow而不是Agent？ | effective-agent-patterns.md | ✓ | ✓ | ✓ |
-| 9 | Claude Code有哪些核心功能？ | Claude Code入门.md | ✓ | ✓ | ✓ |
-| 10 | 如何用Claude Code进行Vibe Coding？ | Claude Code入门.md | ✓ | ✓ | ✓ |
-| | **召回率** | | **80%** | **80%** | **80%** |
-
-**结论：** 三种配置召回率一致。未命中的 HyDE、Orchestrator/Subagent 是语义匹配问题，与分块粒度无关。当前使用 cs=500 + overlap=100 作为默认配置。
+**结论**：召回率一致，未命中的问题是语义匹配问题，与分块粒度无关。默认使用 `chunk_size=500` + `overlap=100`。
