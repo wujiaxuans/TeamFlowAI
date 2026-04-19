@@ -30,11 +30,22 @@ def init_state():
 init_state()
 
 
+def _get_api_key() -> str | None:
+    """获取 API Key，兼容本地 .env 和 Streamlit Cloud Secrets"""
+    key = os.getenv("GLM_API_KEY")
+    if not key:
+        try:
+            key = st.secrets["GLM_API_KEY"]
+        except (AttributeError, KeyError):
+            pass
+    return key
+
+
 def load_qa_chain():
     """初始化或重建 QA 链"""
-    api_key = os.getenv("GLM_API_KEY")
+    api_key = _get_api_key()
     if not api_key:
-        st.error("未检测到 GLM_API_KEY，请在 .env 文件中配置")
+        st.error("未检测到 GLM_API_KEY，请在 .env 或 Streamlit Secrets 中配置")
         return False
     with st.spinner("正在加载知识库..."):
         chain = create_qa_chain(api_key)
@@ -48,7 +59,7 @@ def load_qa_chain():
 
 def reload_vectorstore():
     """增量更新向量库（处理新上传的文件）"""
-    api_key = os.getenv("GLM_API_KEY")
+    api_key = _get_api_key()
     if not api_key:
         return
     with st.spinner("正在更新知识库..."):

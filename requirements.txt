@@ -8,5 +8,3 @@ langchain-text-splitters>=0.3.0
 python-dotenv>=1.0.0
 streamlit>=1.40.0
 requests>=2.31.0
-opendataloader-pdf>=2.0.0
-mineru>=3.0.0

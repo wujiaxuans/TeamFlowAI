@@ -196,7 +196,15 @@ def _convert_new_pdfs():
             tmp_pdf = os.path.join(tmp_dir, "input.pdf")
             shutil.copy2(pdf_path, tmp_pdf)
 
-            mineru_exe = os.path.join(os.path.dirname(sys.executable), "Scripts", "mineru.exe")
+            # 查找 MinerU 可执行文件（Windows: Scripts/mineru.exe, Linux: bin/mineru）
+            mineru_exe = os.path.join(
+                os.path.dirname(sys.executable),
+                "Scripts" if os.name == "nt" else "bin",
+                "mineru.exe" if os.name == "nt" else "mineru",
+            )
+            if not os.path.isfile(mineru_exe):
+                print("MinerU 未安装，跳过 PDF 自动转换")
+                return
             result = subprocess.run(
                 [mineru_exe, "-p", tmp_pdf, "-o", tmp_dir, "-b", "pipeline"],
                 capture_output=True, text=True, timeout=600,
